@@ -76,7 +76,7 @@ function BlockModal({ data, loading, onClose, onNavigate, voteBlocks }) {
   const { event, block } = data
   const fmt    = (ts) => ts != null ? new Date(ts * 1000).toLocaleString('fr-FR') : '—'
   const fmtNum = (n)  => n  != null ? Number(n).toLocaleString('fr-FR') : '—'
-  const sortedBlocks = [...voteBlocks].sort((a, b) => a - b)
+  const sortedBlocks = [...voteBlocks].sort((a, b) => b - a)
   const currentIdx = block?.number != null ? sortedBlocks.indexOf(block.number) : -1
   const canPrev = currentIdx > 0
   const canNext = currentIdx !== -1 && currentIdx < sortedBlocks.length - 1
