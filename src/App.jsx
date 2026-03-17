@@ -500,7 +500,7 @@ function App() {
       setTxStatus({ step: 4, hash: tx.hash, blockNumber: receipt.blockNumber })
       await loadCandidates(provider)
       if (explorerOpen) loadExplorerEvents()
-      setCooldownSeconds(5 * 60)
+      setCooldownSeconds(3 * 60)
     } catch (err) {
       setTxStatus(null)
       setError(err.code === 4001 ? "Transaction annulée." : "Erreur : " + err.message)
