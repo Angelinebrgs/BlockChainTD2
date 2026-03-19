@@ -27,20 +27,30 @@ function App() {
   const [explorerLoading, setExplorerLoading] = useState(false)
 
   const loadCandidates = async (_provider) => {
-    const contract = new Contract(CONTRACT_ADDRESS, ABI, _provider)
-    const count = await contract.getCandidatesCount()
+    try {
+      const contract = new Contract(CONTRACT_ADDRESS, ABI, _provider)
+      const count = await contract.getCandidatesCount()
 
-    const list = []
-    for (let i = 0; i < Number(count); i++) {
-      const [name, voteCount] = await contract.getCandidate(i)
-      list.push({
-        id: i,
-        name,
-        votes: Number(voteCount),
-      })
+      const list = []
+      for (let i = 0; i < Number(count); i++) {
+        const candidate = await contract.getCandidate(i)
+
+        // Compatible avec retour tableau ou objet
+        const name = candidate[0] ?? candidate.name ?? CANDIDATE_NAMES[i] ?? `Candidat #${i}`
+        const voteCount = candidate[1] ?? candidate.voteCount ?? 0
+
+        list.push({
+          id: i,
+          name,
+          votes: Number(voteCount),
+        })
+      }
+
+      setCandidates(list)
+    } catch (err) {
+      console.error('Erreur loadCandidates :', err)
+      setError("Impossible de charger les candidats.")
     }
-
-    setCandidates(list)
   }
 
   useEffect(() => {
@@ -87,14 +97,22 @@ function App() {
 
       const contract = new Contract(CONTRACT_ADDRESS, ABI, _provider)
       const secondsLeft = Number(await contract.getTimeUntilNextVote(address))
+
+      console.log('Cooldown initial =', secondsLeft)
       setCooldownSeconds(secondsLeft)
     } catch (err) {
+      console.error(err)
       setError(err?.code === 4001 ? 'Connexion refusée.' : 'Erreur de connexion.')
     }
   }
 
   const vote = async (candidateIndex) => {
     try {
+      if (!provider || !account) {
+        setError("Connecte ton wallet avant de voter.")
+        return
+      }
+
       setIsVoting(true)
       setError(null)
       setTxHash(null)
@@ -104,9 +122,10 @@ function App() {
       const voteContract = new Contract(CONTRACT_ADDRESS, ABI, signer)
 
       const secondsLeft = Number(await voteContract.getTimeUntilNextVote(account))
+      console.log('Cooldown avant vote =', secondsLeft)
+
       if (secondsLeft > 0) {
         setCooldownSeconds(secondsLeft)
-        setIsVoting(false)
         return
       }
 
@@ -117,39 +136,44 @@ function App() {
       setLastBlockNumber(receipt.blockNumber)
 
       await loadCandidates(provider)
-      setCooldownSeconds(3 * 60)
+
+      // On relit le cooldown réel côté contrat
+      const newSecondsLeft = Number(await voteContract.getTimeUntilNextVote(account))
+      console.log('Cooldown après vote =', newSecondsLeft)
+      setCooldownSeconds(newSecondsLeft > 0 ? newSecondsLeft : 3 * 60)
     } catch (err) {
+      console.error(err)
       setError(err?.code === 4001 ? 'Transaction annulée.' : `Erreur : ${err.message}`)
     } finally {
       setIsVoting(false)
     }
   }
 
+  // Timer stable
   useEffect(() => {
     if (cooldownSeconds <= 0) return
 
     const timer = setInterval(() => {
-      setCooldownSeconds((prev) => {
-        if (prev <= 1) {
-          clearInterval(timer)
-          return 0
-        }
-        return prev - 1
-      })
+      setCooldownSeconds((prev) => Math.max(prev - 1, 0))
     }, 1000)
 
     return () => clearInterval(timer)
+  }, [cooldownSeconds > 0])
+
+  useEffect(() => {
+    console.log('cooldownSeconds =', cooldownSeconds)
   }, [cooldownSeconds])
 
   useEffect(() => {
     if (!provider) return
 
     let listenContract
+    let handler
 
     try {
       listenContract = new Contract(CONTRACT_ADDRESS, ABI, provider)
 
-      const handler = (voter, candidateIndex) => {
+      handler = (voter, candidateIndex) => {
         const idx = Number(candidateIndex)
 
         setLastEvent({
@@ -161,12 +185,14 @@ function App() {
       }
 
       listenContract.on('Voted', handler)
-
-      return () => {
-        listenContract.off('Voted', handler)
-      }
     } catch (err) {
       console.warn("Impossible d'écouter les events :", err.message)
+    }
+
+    return () => {
+      if (listenContract && handler) {
+        listenContract.off('Voted', handler)
+      }
     }
   }, [provider])
 
@@ -182,10 +208,11 @@ function App() {
 
       const enriched = await Promise.all(
         last20.map(async (e) => {
-          const idx = Number(e.args.candidateIndex)
+          const idx = Number(e.args?.candidateIndex ?? e.args?.[1] ?? 0)
 
           let timestamp = null
           let gasUsed = null
+          let voter = e.args?.voter ?? e.args?.[0] ?? 'Adresse inconnue'
 
           try {
             const block = await provider.getBlock(e.blockNumber)
@@ -200,7 +227,7 @@ function App() {
           return {
             hash: e.transactionHash,
             blockNumber: e.blockNumber,
-            voter: e.args.voter,
+            voter,
             candidateName: CANDIDATE_NAMES[idx] ?? `Candidat #${idx}`,
             timestamp,
             gasUsed,
@@ -209,7 +236,8 @@ function App() {
       )
 
       setExplorerEvents(enriched)
-    } catch {
+    } catch (err) {
+      console.error('Erreur explorer :', err)
       setExplorerEvents([])
     } finally {
       setExplorerLoading(false)
@@ -223,7 +251,14 @@ function App() {
   }, [explorerOpen, provider])
 
   return (
-    <div style={{ maxWidth: '900px', margin: '0 auto', padding: '24px', fontFamily: 'Arial, sans-serif' }}>
+    <div
+      style={{
+        maxWidth: '900px',
+        margin: '0 auto',
+        padding: '24px',
+        fontFamily: 'Arial, sans-serif',
+      }}
+    >
       <h1>Élection Présidentielle On-Chain</h1>
 
       {!account ? (
@@ -236,51 +271,81 @@ function App() {
 
       {error && <p style={{ color: 'red' }}>⚠ {error}</p>}
 
-      {cooldownSeconds > 0 && (
-        <div style={{ margin: '16px 0', padding: '12px', background: '#f7f7f7', borderRadius: '8px' }}>
-          <p>⏳ Prochain vote disponible dans :</p>
-          <p style={{ fontSize: '32px', fontFamily: 'monospace', fontWeight: 'bold' }}>
-            {String(Math.floor(cooldownSeconds / 60)).padStart(2, '0')}:
-            {String(cooldownSeconds % 60).padStart(2, '0')}
-          </p>
-          <p style={{ fontSize: '12px', color: 'gray' }}>
-            La blockchain enregistre l'heure de votre dernier vote via block.timestamp
-          </p>
-        </div>
-      )}
+      <div
+        style={{
+          margin: '16px 0',
+          padding: '12px',
+          background: '#f7f7f7',
+          borderRadius: '8px',
+        }}
+      >
+        {cooldownSeconds > 0 ? (
+          <>
+            <p>⏳ Prochain vote disponible dans :</p>
+            <p
+              style={{
+                fontSize: '32px',
+                fontFamily: 'monospace',
+                fontWeight: 'bold',
+              }}
+            >
+              {String(Math.floor(cooldownSeconds / 60)).padStart(2, '0')}:
+              {String(cooldownSeconds % 60).padStart(2, '0')}
+            </p>
+          </>
+        ) : (
+          <p>✅ Vous pouvez voter maintenant</p>
+        )}
+
+        <p style={{ fontSize: '12px', color: 'gray' }}>
+          La blockchain enregistre l'heure de votre dernier vote via block.timestamp
+        </p>
+      </div>
 
       {lastEvent && (
-        <div style={{ background: '#f0fff0', padding: '10px', borderRadius: '8px', marginBottom: '16px' }}>
+        <div
+          style={{
+            background: '#f0fff0',
+            padding: '10px',
+            borderRadius: '8px',
+            marginBottom: '16px',
+          }}
+        >
           ⚡ Nouveau vote — <strong>{lastEvent.voter}</strong> a voté pour{' '}
           <strong>{lastEvent.candidateName}</strong>
         </div>
       )}
 
       <h2>Résultats</h2>
-      {candidates.map((c) => (
-        <div
-          key={c.id}
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            padding: '12px',
-            marginBottom: '10px',
-            border: '1px solid #ddd',
-            borderRadius: '8px',
-          }}
-        >
-          <div>
-            <strong>{c.name}</strong> — {c.votes} vote(s)
-          </div>
 
-          {account && cooldownSeconds === 0 && (
-            <button onClick={() => vote(c.id)} disabled={isVoting}>
-              {isVoting ? '⏳ En cours...' : 'Voter →'}
-            </button>
-          )}
-        </div>
-      ))}
+      {candidates.length === 0 ? (
+        <p>Chargement des candidats...</p>
+      ) : (
+        candidates.map((c) => (
+          <div
+            key={c.id}
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '12px',
+              marginBottom: '10px',
+              border: '1px solid #ddd',
+              borderRadius: '8px',
+            }}
+          >
+            <div>
+              <strong>{c.name}</strong> — {c.votes} vote(s)
+            </div>
+
+            {account && cooldownSeconds === 0 && (
+              <button onClick={() => vote(c.id)} disabled={isVoting}>
+                {isVoting ? '⏳ En cours...' : 'Voter →'}
+              </button>
+            )}
+          </div>
+        ))
+      )}
 
       {txHash && <p>Transaction envoyée : {txHash}</p>}
       {lastBlockNumber && <p>✅ Incluse dans le bloc #{lastBlockNumber}</p>}
@@ -297,7 +362,11 @@ function App() {
             ) : explorerEvents.length === 0 ? (
               <p>Aucun vote enregistré pour l'instant.</p>
             ) : (
-              <table border="1" cellPadding="8" style={{ borderCollapse: 'collapse', width: '100%' }}>
+              <table
+                border="1"
+                cellPadding="8"
+                style={{ borderCollapse: 'collapse', width: '100%' }}
+              >
                 <thead>
                   <tr>
                     <th>Tx Hash</th>
@@ -321,9 +390,15 @@ function App() {
                         </a>
                       </td>
                       <td>{e.blockNumber}</td>
-                      <td>{e.voter.slice(0, 10)}...{e.voter.slice(-6)}</td>
+                      <td>
+                        {e.voter.slice(0, 10)}...{e.voter.slice(-6)}
+                      </td>
                       <td>{e.candidateName}</td>
-                      <td>{e.timestamp ? new Date(e.timestamp * 1000).toLocaleString('fr-FR') : '—'}</td>
+                      <td>
+                        {e.timestamp
+                          ? new Date(e.timestamp * 1000).toLocaleString('fr-FR')
+                          : '—'}
+                      </td>
                       <td>{e.gasUsed ? `${e.gasUsed.toLocaleString()} unités` : '—'}</td>
                     </tr>
                   ))}
